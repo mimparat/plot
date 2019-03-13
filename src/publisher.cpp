@@ -5,6 +5,7 @@
 #include <tf/transform_broadcaster.h>
 #include <sstream>
 #include <hanp_msgs/TrackedHumans.h>
+#include <hanp_msgs/HumanTrajectoryArray.h>
 #include <tf/transform_listener.h>
 #include <std_msgs/Time.h>
 #include <plot/StampedFloat.h>
@@ -30,6 +31,7 @@ geometry_msgs::PoseWithCovariance  human_pos_old ;
 geometry_msgs::PoseWithCovariance  human_pos_now ;
 ros::Time old_time ;
 int new_socket;
+nav_msgs::Path human_path;
 
 
 
@@ -52,6 +54,24 @@ void humanPositionCallback(const hanp_msgs::TrackedHumansConstPtr humans) {
 		}
 	}
 }
+
+void humanPathsCallback(const hanp_msgs::HumanTrajectoryArrayConstPtr humans_traj) {
+	for (auto traj: humans_traj->trajectories){
+		if (traj.id == 3){
+			human_path.poses.clear();
+			human_path.poses.resize(traj.trajectory.points.size());
+			human_path.header = traj.header;
+			for (int i = 0; i < traj.trajectory.points.size(); i++){
+
+				human_path.poses[i].pose.orientation = traj.trajectory.points[i].transform.rotation;
+				human_path.poses[i].pose.position.x = traj.trajectory.points[i].transform.translation.x;
+				human_path.poses[i].pose.position.y = traj.trajectory.points[i].transform.translation.y;
+				human_path.poses[i].pose.position.z = traj.trajectory.points[i].transform.translation.z;
+			}
+		}
+	}
+}
+
 
 void velCallback (const geometry_msgs::TwistConstPtr cmd_vel ){
 
@@ -139,7 +159,7 @@ int main(int argc, char **argv)
      */
   // %Tag(PUBLISHER)%
 
- // ros::Timer timer = n.createTimer(ros::Duration(0.5), timerCallback);
+ //ros::Timer timer = n.createTimer(ros::Duration(0.5), timerCallback);
 
 
 
@@ -202,8 +222,11 @@ int main(int argc, char **argv)
   ros::Publisher human_speed_pub  = n.advertise<plot::StampedFloat> ("human_speed", 1000);
 
   ros::Publisher ttc_pub  = n.advertise<plot::StampedFloat> ("ttc", 1000);
+  ros::Publisher ttcl_pub  = n.advertise<plot::StampedFloat> ("ttcl", 1000);
+
   ros::Publisher ttc_cost_pub  = n.advertise<plot::StampedFloat> ("ttc_cost", 1000);
   ros::Publisher ttc_plus_cost_pub  = n.advertise<plot::StampedFloat> ("ttc_plus_cost", 1000);
+  ros::Publisher ttclosest_cost_pub  = n.advertise<plot::StampedFloat> ("ttclosest_cost", 1000);
 
   ros::Publisher i_pub  = n.advertise<plot::StampedFloat> ("i", 1000);
   ros::Publisher j_pub  = n.advertise<plot::StampedFloat> ("j", 1000);
@@ -213,6 +236,7 @@ int main(int argc, char **argv)
   ros::Publisher speeds_dot_product_pub = n.advertise<plot::StampedFloat> ("speeds_dot_prod", 1000);
 
   ros::Subscriber human_position_sub = n.subscribe("/move_humans_node/humans", 1000, humanPositionCallback );
+  ros::Subscriber human_paths_sub = n.subscribe("/move_base_node/TebLocalPlannerROS/human_local_trajs", 1000, humanPathsCallback);
   ros::Subscriber cmd_vel_sub = n.subscribe("/cmd_vel", 1000, velCallback );
 
   ros::Publisher vel_pub  = n.advertise<std_msgs::Float64MultiArray> ("vel_cmd", 1000);
@@ -243,7 +267,6 @@ int main(int argc, char **argv)
 	 geometry_msgs::PoseStamped pose;
 
 
-
 	 pose.header.stamp = now;
 	 pose.header.frame_id = 1 ;
 	 pose.pose.position.x = robot_pos_now.getOrigin().x();
@@ -254,18 +277,27 @@ int main(int argc, char **argv)
 	 path.poses.push_back(pose);
 	 robot_pose_pub.publish(path);
 
+//	 human_path.header.stamp = now;
+//     human_path.header.frame_id = "map" ;
+//	 human_pose_pub.publish(human_path);
 
 	 nav_msgs::Path hpath;
-     geometry_msgs::PoseStamped hpose;
+	 geometry_msgs::PoseStamped hpose;
 
 	 hpose.header.stamp = now;
-	 hpose.header.frame_id = 1 ;
-	 hpose.pose.position.x = human_pos_old.pose.position.x;
-	 hpose.pose.position.y = human_pos_old.pose.position.y;
+	 hpose.header.frame_id = "odom" ;
+	 hpose.pose.position.x = human_pos_now.pose.position.x;
+	 hpose.pose.position.y = human_pos_now.pose.position.y;
+	 hpose.pose.orientation.w = human_pos_now.pose.orientation.w ;
+	 hpose.pose.orientation.x = human_pos_now.pose.orientation.x ;
+	 hpose.pose.orientation.y = human_pos_now.pose.orientation.y ;
+	 hpose.pose.orientation.z = human_pos_now.pose.orientation.z ;
+
 
 	 hpath.header.stamp = now;
-	 hpose.header.frame_id = 1;
+	 hpath.header.frame_id = "odom";
 	 hpath.poses.push_back(hpose);
+	 //hpath.poses = human_path.poses;
 	 human_pose_pub.publish(hpath);
 
 //	 geometry_msgs::PoseStamped pose;
@@ -338,6 +370,7 @@ int main(int argc, char **argv)
 
 
 	 plot::StampedFloat ttc_msg;
+	 plot::StampedFloat ttcl_msg;
 
 	 double robot_radius, human_radius;
 	 if (!n.getParam("/move_base_node/TebLocalPlannerROS/footprint_model/radius", robot_radius)){
@@ -350,9 +383,10 @@ int main(int argc, char **argv)
 	 }
 	 double radius_sum_sq_ = (robot_radius + human_radius) * (robot_radius + human_radius);
 	 double ttc = std::numeric_limits<double>::infinity();
+	 double ttcl = std::numeric_limits<double>::infinity();
 	 int i , j;
 	 double d=20;
-	 double cost_ttc , cost_ttcplus ;
+	 double cost_ttc , cost_ttcplus , cost_ttcl;
 	 double C_sq = hr_dist * hr_dist;
 	    if (C_sq <= radius_sum_sq_) {
 	      ttc = 0.0;
@@ -361,21 +395,30 @@ int main(int argc, char **argv)
 	    	double V_sq =(v_x*v_x) +( v_y*v_y);
 
 	        if (dist_speeds_dot_prod  > 0) { // otherwise ttc is infinite
-	        double f = (dist_speeds_dot_prod * dist_speeds_dot_prod) - (V_sq * (C_sq - radius_sum_sq_));
+	        double f = (dist_speeds_dot_prod * dist_speeds_dot_prod) - (V_sq * (C_sq - radius_sum_sq_));//25
+	        double fe = (dist_speeds_dot_prod * dist_speeds_dot_prod) - (V_sq * (C_sq  - (0.5+radius_sum_sq_)));//30
 
-	        	if (f > 0) {
+	        	if (fe > 0) {
+	        		//ttclosest
+	        		                      ttcl = dist_speeds_dot_prod/ V_sq ;
+	        			        		  ttcl_msg.header.stamp = now;
+	        			        		  ttcl_msg.data = ttcl;
+	        			        		  ttcl_pub.publish(ttcl_msg);
+	        		if(f>0){
 	        		// if(i==0){ d = C_sq;  }
 	        		 i=i+1;
+
 	        		 ttc = (dist_speeds_dot_prod - std::sqrt(f)) / V_sq;
 	        		 ttc_msg.header.stamp = now;
-	        		 	    	 ttc_msg.data = ttc;
-	        		 	    	 ttc_pub.publish(ttc_msg);
+	        		 ttc_msg.data = ttc;
+	        		 ttc_pub.publish(ttc_msg);
+
                            }
 	        	 }
+	        }
 	    }
 
-
-//	    plot::StampedFloat ttc_msg;
+	    plot::StampedFloat ttcl_cost_msg;
 	    plot::StampedFloat ttc_cost_msg;
 	    plot::StampedFloat ttc_plus_cost_msg;
 	    plot::StampedFloat i_msg;
@@ -446,6 +489,38 @@ if( C_sq >2){
 			    	ttc_plus_cost_pub.publish(ttc_plus_cost_msg);
 			         }
 		}
+
+
+	//TTCLOSEST DISTANCE
+	if (ttcl < std::numeric_limits<double>::infinity()) {
+	      // if (ttcl > 0) {
+	      //   // valid ttcl
+	      //   _error[0] = penaltyBoundFromBelow(ttcl, cfg_->human.ttcl_threshold,
+	      //                                 cfg_->optim.penalty_epsilon);
+	      // } else {
+	      //   // already in collision
+	      //   _error[0] = cfg_->optim.max_ttcl_penalty;
+	      // }
+
+		    cost_ttcl = penaltyBoundFromBelow(ttcl, 5.0, 0.1);
+	     	ttcl_cost_msg.header.stamp = now;
+			ttcl_cost_msg.data = cost_ttcl;
+			ttclosest_cost_pub.publish(ttcl_cost_msg);
+
+	    } else {
+	      // no collsion possible
+	    	cost_ttcl = 0.0;
+	    	ttcl = std::numeric_limits<double>::infinity();
+	    	ttcl_msg.data = -1.5;
+	    	ttcl_pub.publish(ttcl_msg);
+	    	ttcl_cost_msg.header.stamp = now;
+	    			ttcl_cost_msg.data = cost_ttcl;
+	    			ttclosest_cost_pub.publish(ttcl_cost_msg);
+	    }
+
+
+
+
 
 //	    ttc_cost_pub.publish(ttc_cost_msg);
 //	    ttc_plus_cost_pub.publish(ttc_plus_cost_msg);
